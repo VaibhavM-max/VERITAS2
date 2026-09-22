@@ -81,6 +81,7 @@ def _run_task(customer_id: str, order_id: str, amount: float) -> dict:
     from scripts.init_db import init_database
     from verifier.independent_verifier import IndependentVerifier
 
+    started_at = time.perf_counter()
     progress = st.progress(0, text="Preparing verified execution")
     database_path = os.getenv("DATABASE_PATH", "data/veritas.db")
     init_database(database_path)
@@ -101,16 +102,37 @@ def _run_task(customer_id: str, order_id: str, amount: float) -> dict:
     result = {
         "task_id": plan["task_id"],
         "description": plan["description"],
+        "plan": plan,
         "final_status": gated["final_status"],
         "completed_steps": gated.get("completed_steps", []),
         "evidence": [receipt.to_dict() for receipt in gated.get("evidence_log", [])],
         "claims": report["claims"],
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "execution_time": time.perf_counter() - started_at,
+        "verification_rate": round(
+            sum(receipt.result == "VERIFIED" for receipt in gated.get("evidence_log", []))
+            / max(1, len(gated.get("evidence_log", []))) * 100,
+            1,
+        ),
+        "is_offline": not _connectivity(),
     }
     progress.progress(100, text="Execution complete")
     time.sleep(0.25)
     progress.empty()
     st.session_state.tasks.insert(0, result)
+    from analytics.anomaly_detector import AnomalyDetector
+    from gamification.achievements import AchievementManager
+
+    metrics = {
+        "execution_time": result["execution_time"],
+        "evidence_count": len(result["evidence"]),
+        "verification_rate": result["verification_rate"],
+        "is_offline": result["is_offline"],
+    }
+    detector = AnomalyDetector()
+    result["anomalies"] = detector.detect_anomalies(result["task_id"], metrics)
+    detector.record_execution(result["task_id"], metrics)
+    result["new_achievements"] = AchievementManager().update_stats(st.session_state.user_email, result)
     return result
 
 
@@ -294,6 +316,92 @@ def render_analytics() -> None:
         st.info("Run a task to populate claim verification data.")
 
 
+def render_achievements() -> None:
+    from gamification.achievements import AchievementManager
+
+    _render_header("Achievements", "A visible record of reliable operator behavior.")
+    manager = AchievementManager()
+    achievements = manager.get_user_achievements(st.session_state.user_email)
+    columns = st.columns(2)
+    columns[0].metric("Total points", manager.get_total_points(st.session_state.user_email))
+    columns[1].metric("Badges unlocked", len(achievements))
+    if not achievements:
+        st.info("Complete a verified task to unlock your first badge.")
+        return
+    for achievement in achievements:
+        st.success(f"{achievement['name']} · {achievement['points']} points")
+        st.caption(f"{achievement['description']} · unlocked {achievement['unlocked_at']}")
+
+
+def render_anomalies() -> None:
+    from analytics.anomaly_detector import AnomalyDetector
+
+    _render_header("Anomaly watch", "Statistical signals from recent execution behavior.")
+    summary = AnomalyDetector().get_anomaly_summary()
+    columns = st.columns(3)
+    columns[0].metric("Signals", summary["total_anomalies"])
+    columns[1].metric("Critical", summary["by_severity"]["CRITICAL"])
+    columns[2].metric("High", summary["by_severity"]["HIGH"])
+    if summary["by_type"]:
+        st.dataframe(
+            [{"Signal": key, "Count": value} for key, value in summary["by_type"].items()],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No anomalies detected in the last 24 hours.")
+    for task in st.session_state.tasks:
+        for finding in task.get("anomalies", []):
+            st.warning(f"{finding['severity']} · {finding['description']}")
+
+
+def render_replay() -> None:
+    from replay.execution_replay import ExecutionReplayer
+
+    _render_header("Execution replay", "Step through a completed plan without re-running it.")
+    if not st.session_state.tasks:
+        st.info("Run a task first to create a replay.")
+        return
+    task_index = st.selectbox("Task", range(len(st.session_state.tasks)), format_func=lambda index: st.session_state.tasks[index]["task_id"])
+    task = st.session_state.tasks[task_index]
+    replay = ExecutionReplayer(task)
+    state_key = f"replay_step_{task['task_id']}"
+    replay.current_step = st.session_state.get(state_key, 0)
+    controls = st.columns(3)
+    if controls[0].button("Previous", use_container_width=True):
+        replay.previous()
+    if controls[1].button("Reset", use_container_width=True):
+        replay.reset()
+    if controls[2].button("Next", use_container_width=True):
+        replay.next()
+    st.session_state[state_key] = replay.current_step
+    st.progress(replay.progress(), text=f"Step {replay.current_step + 1} of {replay.total_steps}")
+    current = replay.current()
+    if current:
+        st.info(f"{current['step_id']} · {current['description']}")
+        st.json(current)
+
+
+def render_comparison() -> None:
+    from analytics.comparison import build_comparison
+
+    _render_header("Comparative view", "Measured VERITAS outcomes beside explicit benchmark gaps.")
+    st.dataframe(build_comparison(st.session_state.tasks), hide_index=True, use_container_width=True)
+    st.caption("Baseline values are intentionally marked unavailable until a controlled naive-agent benchmark is recorded.")
+
+
+def render_command_palette() -> None:
+    from voice.voice_commands import parse_command
+
+    command = st.sidebar.text_input("Command", placeholder="e.g. show evidence ledger")
+    if st.sidebar.button("Go", use_container_width=True):
+        destination = parse_command(command)
+        if destination:
+            st.session_state.command_page = destination
+            st.rerun()
+        st.sidebar.error("Command not recognized.")
+
+
 def render_settings() -> None:
     st.sidebar.markdown("### Live view")
     auto_refresh = st.sidebar.checkbox("Auto-refresh every 5 seconds", value=False)
@@ -313,10 +421,13 @@ st.session_state.user_email = authenticated_email
 _init_state()
 queue_stats, online = _render_status()
 st.sidebar.markdown("---")
-page = st.sidebar.radio("View", ["Dashboard", "Run task", "Evidence ledger", "Offline queue", "Analytics"])
+pages = ["Dashboard", "Run task", "Evidence ledger", "Offline queue", "Analytics", "Achievements", "Anomalies", "Replay", "Comparison"]
+page = st.sidebar.radio("View", pages, index=pages.index(st.session_state.get("command_page", "Dashboard")))
+st.session_state.command_page = page
 if st.sidebar.button("Refresh data"):
     st.rerun()
 render_settings()
+render_command_palette()
 
 if page == "Dashboard":
     render_dashboard(queue_stats, online)
@@ -326,5 +437,13 @@ elif page == "Evidence ledger":
     render_evidence()
 elif page == "Offline queue":
     render_queue(queue_stats, online)
+elif page == "Achievements":
+    render_achievements()
+elif page == "Anomalies":
+    render_anomalies()
+elif page == "Replay":
+    render_replay()
+elif page == "Comparison":
+    render_comparison()
 else:
     render_analytics()
