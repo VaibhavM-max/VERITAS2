@@ -1,0 +1,7 @@
+services:
+  veritas:
+    build: .
+    environment:
+      DATABASE_PATH: /app/data/veritas.db
+    volumes:
+      - ./data:/app/data

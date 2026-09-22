@@ -1,0 +1,5 @@
+completion:
+  require_verified_receipt_for_every_step: true
+  allow_unverifiable_claims: false
+recovery:
+  max_retries: 3
