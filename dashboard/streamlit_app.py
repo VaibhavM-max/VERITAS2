@@ -14,6 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from auth.login_page import render_login_page
+from auth.otp_auth import auth_manager
+
 
 st.set_page_config(
     page_title="VERITAS Control Room",
@@ -128,6 +131,13 @@ def _render_status() -> tuple[dict, bool]:
     st.sidebar.metric("Pending queue", queue_stats["PENDING"])
     st.sidebar.metric("Synced", queue_stats["SYNCED"])
     st.sidebar.metric("Failed", queue_stats["FAILED"])
+    st.sidebar.markdown("---")
+    st.sidebar.caption(st.session_state.get("user_email", "Authenticated operator"))
+    if st.sidebar.button("Sign out", use_container_width=True):
+        auth_manager.logout(st.session_state.get("session_id"))
+        for key in ("logged_in", "session_id", "user_email", "login_email"):
+            st.session_state.pop(key, None)
+        st.rerun()
     return queue_stats, online
 
 
@@ -292,6 +302,14 @@ def render_settings() -> None:
         st.rerun()
 
 
+is_authenticated, authenticated_email = auth_manager.validate_session(st.session_state.get("session_id"))
+if not is_authenticated:
+    st.session_state.pop("logged_in", None)
+    render_login_page()
+    st.stop()
+
+st.session_state.logged_in = True
+st.session_state.user_email = authenticated_email
 _init_state()
 queue_stats, online = _render_status()
 st.sidebar.markdown("---")
