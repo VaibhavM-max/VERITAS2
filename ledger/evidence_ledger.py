@@ -8,6 +8,7 @@ import uuid
 
 from ledger.crypto import load_keys_from_env, sha256_hash, sign_message, verify_signature
 from ledger.merkle import MerkleAccumulator
+from offline_queue import OfflineQueueManager
 
 
 @dataclass
@@ -44,12 +45,18 @@ class EvidenceReceipt:
 
 
 class EvidenceLedger:
-    def __init__(self, private_key_hex: str, public_key_hex: str) -> None:
+    def __init__(
+        self,
+        private_key_hex: str,
+        public_key_hex: str,
+        offline_queue: OfflineQueueManager | None = None,
+    ) -> None:
         self.private_key = private_key_hex
         self.public_key = public_key_hex
         self.checkpoints: list[EvidenceReceipt] = []
         self.merkle_tree = MerkleAccumulator()
         self.ledger_id = f"VERITAS-LEDGER-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        self.offline_queue = offline_queue
 
     def append(self, receipt: EvidenceReceipt) -> EvidenceReceipt:
         receipt.previous_hash = (
@@ -59,6 +66,8 @@ class EvidenceLedger:
         receipt.merkle_root = self.merkle_tree.root
         receipt.signature = sign_message(self.private_key, receipt.serialize(exclude_signature=True))
         self.checkpoints.append(receipt)
+        if self.offline_queue is not None:
+            self.offline_queue.enqueue_evidence_receipt(receipt.to_dict())
         return receipt
 
     def verify(self, receipt: EvidenceReceipt) -> bool:
