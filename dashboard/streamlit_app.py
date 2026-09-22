@@ -169,7 +169,8 @@ def render_dashboard(queue_stats: dict, online: bool) -> None:
     verified = sum(receipt["result"] == "VERIFIED" for receipt in receipts)
     trust_score = round(verified / len(receipts) * 100) if receipts else 0
     _render_header("Control room", "A live view of execution, proof, and recovery state.")
-    st.caption(f"Last checked {datetime.now().strftime('%H:%M:%S')} · {"Connected to the network" if online else "Operating offline-first"}")
+    connection_label = "Connected to the network" if online else "Operating offline-first"
+    st.caption(f"Last checked {datetime.now().strftime('%H:%M:%S')} · {connection_label}")
 
     columns = st.columns(4)
     columns[0].metric("Tasks executed", len(tasks))
